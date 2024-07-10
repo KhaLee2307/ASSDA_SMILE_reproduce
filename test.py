@@ -127,12 +127,13 @@ def validation(model, criterion, eval_loader, converter, opt, tqdm_position=1):
     infer_time = 0
     valid_loss_avg = Averager()
 
-    for i, (image_tensors, labels) in tqdm(
-        enumerate(eval_loader),
-        total=len(eval_loader),
-        position=tqdm_position,
-        leave=False,
-    ):
+    # for i, (image_tensors, labels) in tqdm(
+    #     enumerate(eval_loader),
+    #     total=len(eval_loader),
+    #     position=tqdm_position,
+    #     leave=False,
+    # ):
+    for image_tensors, labels in eval_loader:
         batch_size = image_tensors.size(0)
         length_of_data = length_of_data + batch_size
         image = image_tensors.to(device)

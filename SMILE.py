@@ -154,8 +154,6 @@ def main(opt):
     loss_avg = Averager()
 
     # training loop
-    gamma = 0
-    omega = 1
     start_iter = 0
     best_score = float('-inf')
     score_descent = 0
@@ -376,8 +374,6 @@ if __name__ == '__main__':
                         help='Decrease learning rate at these epochs.')
     parser.add_argument('--pc', type=float, default=0.0,
                         help='confidence threshold,, 0,0.1,0.2,0.4,0.8.')
-    parser.add_argument('--gamma', type=float, default=0.1,
-                        help='LR is multiplied by gamma on schedule.')
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                         help='momentum')
     parser.add_argument('--weight_decay', '--wd', default=1e-4, type=float,
