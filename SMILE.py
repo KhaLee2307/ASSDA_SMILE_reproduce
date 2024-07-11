@@ -51,8 +51,8 @@ def main(opt):
     valid_data, valid_data_log = hierarchical_dataset(opt.valid_data, opt)
     opt_log += valid_data_log
 
-    source_loader = get_dataloader(opt, source_data, opt.batch_size, shuffle = True)
-    target_loader = get_dataloader(opt, target_data, opt.batch_size, shuffle = True, mode = "raw")
+    source_loader = get_dataloader(opt, source_data, opt.batch_size, shuffle = True, mode = "label", aug = opt.aug)
+    target_loader = get_dataloader(opt, target_data, opt.batch_size, shuffle = True, mode = "raw", aug = opt.aug)
     valid_loader = get_dataloader(opt, valid_data, opt.batch_size_val, shuffle = False)
 
     del source_data, source_data_log, target_data, target_data_log, valid_data, valid_data_log

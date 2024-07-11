@@ -14,7 +14,7 @@ _MEAN_IMAGENET = torch.tensor([0.485, 0.456, 0.406])
 _STD_IMAGENET  = torch.tensor([0.229, 0.224, 0.225])
 
 
-def get_dataloader(opt, dataset, batch_size, shuffle = False, mode = "label"):
+def get_dataloader(opt, dataset, batch_size, shuffle = False, mode = "label", aug = False):
     """
     Get dataloader for each dataset
 
@@ -31,9 +31,9 @@ def get_dataloader(opt, dataset, batch_size, shuffle = False, mode = "label"):
     """
 
     if mode == "raw":
-        myAlignCollate = AlignCollateRaw(opt)
+        myAlignCollate = AlignCollateRaw(opt, aug)
     else:
-        myAlignCollate = AlignCollate(opt, mode)
+        myAlignCollate = AlignCollate(opt, aug)
 
     data_loader = DataLoader(
             dataset,
@@ -112,10 +112,10 @@ class Pseudolabel_Dataset(Dataset):
 
 class AlignCollate(object):
     """ Transform data to the same format """
-    def __init__(self, opt, mode = "label"):
+    def __init__(self, opt, aug = False):
         self.opt = opt
         # resize image
-        if (mode == "adapt" or mode == "supervised"):
+        if (aug == True):
             self.transform = Rand_augment()
         else:
             self.transform = torchvision.transforms.Compose([])
@@ -131,17 +131,24 @@ class AlignCollate(object):
 
         return image_tensors, labels
 
+
 class AlignCollateRaw(object):
     """ Transform data to the same format """
-    def __init__(self, opt):
+    def __init__(self, opt, aug = False):
         self.opt = opt
         # resize image
-        self.transform = ResizeNormalize(opt)
+        if (aug == True):
+            self.transform = Rand_augment()
+        else:  
+            self.transform = torchvision.transforms.Compose([])
+
+        self.resize = ResizeNormalize(opt)
+        print("Use Text_augment", self.transform)
 
     def __call__(self, batch):
         images = batch
 
-        image_tensors = [self.transform(image) for image in images]
+        image_tensors = [self.resize(self.transform(image)) for image in images]
         image_tensors = torch.cat([t.unsqueeze(0) for t in image_tensors], 0)
 
         return image_tensors
