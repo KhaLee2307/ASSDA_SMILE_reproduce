@@ -188,7 +188,7 @@ def main(opt):
                 score_descent = 0
 
                 best_score = current_score
-                torch.save(model.state_dict(), f"./trained_model/{opt.approach}/{opt.model}_best_ASSDA.pth")
+                torch.save(model.state_dict(), f"./trained_model/{opt.approach}/{opt.model}_best_SMILE.pth")
             else:
                 score_descent += 1
 
