@@ -255,19 +255,20 @@ def main(opt):
             loss = src_cls_loss.mean() + choosed_ent_pool.mean() * tar_lambda
         else:
             loss = src_cls_loss.mean() + tar_em_loss.mean() * tar_lambda
-        
+
+        model.zero_grad(set_to_none=True)        
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(), opt.grad_clip
+        )   # gradient clipping with 5 (Default)
+        optimizer.step()
+
         loss_avg.add(loss)
         cls_loss_avg.add(src_cls_loss)
         em_loss_avg.add(tar_em_loss)
 
-        # set gradient to zero...
-        model.zero_grad(set_to_none=True)
+        scheduler.step()
         
-        # backward
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)  # gradient clipping with 5 (Default)
-        optimizer.step()
-
 
 if __name__ == '__main__':
     """ Argument """ 

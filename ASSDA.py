@@ -6,7 +6,6 @@ from tqdm import tqdm
 import numpy as np
 
 import torch
-import torch.optim as optim
 import torch.backends.cudnn as cudnn
 from torch.utils.data import Subset
 
@@ -14,7 +13,6 @@ from source.dataset import hierarchical_dataset, get_dataloader
 from source.model import Model
 
 from modules.domain_adapt import d_cls_inst
-from modules.radam import AdamW, RAdam
 
 from utils.converter import AttnLabelConverter, CTCLabelConverter
 from utils.averager import Averager
@@ -41,54 +39,6 @@ def filter_local_features(opt,
     target_valid_char_feature = target_feature.reshape(-1, feature_dim).index_select(0, target_valid_char_index)
 
     return source_valid_char_feature, target_valid_char_feature
-
-
-def setup_optimizer(opt, filtered_parameters, global_discriminator_params, local_discriminator_params):
-    # setup optimizer
-    if opt.optimizer.lower() == 'sgd':
-        optimizer = optim.SGD(filtered_parameters, lr=opt.lr, momentum=opt.momentum,
-                                weight_decay=opt.weight_decay)
-        d_image_opt = optim.SGD(global_discriminator_params, lr=opt.lr,
-                                momentum=opt.momentum,
-                                weight_decay=opt.weight_decay)
-        d_inst_opt = optim.SGD(local_discriminator_params,
-                                lr=opt.lr, momentum=opt.momentum,
-                                weight_decay=opt.weight_decay)
-
-    elif opt.optimizer.lower() == 'adam':
-        optimizer = AdamW(filtered_parameters, lr=opt.lr, betas=(opt.beta1, opt.beta2),
-                                weight_decay=opt.weight_decay)
-        d_image_opt = AdamW(global_discriminator_params, lr=opt.lr,
-                                betas=(opt.beta1, opt.beta2),
-                                weight_decay=opt.weight_decay)
-        d_inst_opt = AdamW(local_discriminator_params,
-                                betas=(opt.beta1, opt.beta2),
-                                weight_decay=opt.weight_decay)
-
-    elif opt.optimizer.lower() == 'radam':
-        optimizer = RAdam(filtered_parameters, lr=opt.lr,
-                                betas=(opt.beta1, opt.beta2),
-                                weight_decay=opt.weight_decay)
-        d_image_opt = RAdam(global_discriminator_params, lr=opt.lr,
-                                betas=(opt.beta1, opt.beta2),
-                                weight_decay=opt.weight_decay)
-        d_inst_opt = RAdam(local_discriminator_params,
-                                betas=(opt.beta1, opt.beta2),
-                                weight_decay=opt.weight_decay)
-
-    else:
-        optimizer = optim.Adadelta(filtered_parameters, lr=0.1 * opt.lr, rho=opt.rho,
-                                            eps=opt.eps)
-        d_image_opt = optim.Adadelta(global_discriminator_params,
-                                            lr=opt.lr,
-                                            rho=opt.rho,
-                                            eps=opt.eps)
-        d_inst_opt = optim.Adadelta(local_discriminator_params,
-                                            lr=opt.lr,
-                                            rho=opt.rho,
-                                            eps=opt.eps)
-
-    return optimizer, d_image_opt, d_inst_opt
 
 
 def main(opt):
@@ -187,9 +137,35 @@ def main(opt):
     main_log += opt_log
 
     # set up optimizer
-    optimizer, d_image_opt, d_inst_opt  = setup_optimizer(opt, filtered_parameters, 
-                                                            global_discriminator.parameters(), 
-                                                            local_discriminator.parameters())
+    optimizer_model = torch.optim.AdamW(filtered_parameters, lr=opt.lr, weight_decay = 0.01)
+    optimizer_global = torch.optim.AdamW(global_discriminator.parameters(), lr=opt.lr, weight_decay = 0.01)
+    optimizer_local = torch.optim.AdamW(local_discriminator.parameters(), lr=opt.lr, weight_decay = 0.01)
+
+    # set up scheduler
+    scheduler_model = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer_model,
+                max_lr=opt.lr,
+                cycle_momentum=False,
+                div_factor=20,
+                final_div_factor=1000,
+                total_steps=opt.total_iter,
+            )
+    scheduler_global = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer_global,
+                max_lr=opt.lr,
+                cycle_momentum=False,
+                div_factor=20,
+                final_div_factor=1000,
+                total_steps=opt.total_iter,
+            )
+    scheduler_local = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer_local,
+                max_lr=opt.lr,
+                cycle_momentum=False,
+                div_factor=20,
+                final_div_factor=1000,
+                total_steps=opt.total_iter,
+            )
 
     print("Start Adapting...\n")
     main_log += "Start Adapting...\n"
@@ -211,14 +187,16 @@ def main(opt):
     score_descent = 0
 
     for iteration in tqdm(
-            range(start_iter, opt.total_iter + 1),
-            total=opt.total_iter,
-            position=0,
-            leave=True,
-        ):
+        range(0, opt.total_iter + 1),
+        total=opt.total_iter,
+        position=0,
+        leave=True,
+    ):
         if (iteration % opt.val_interval == 0 or iteration == opt.total_iter):
             # valiation part
             model.eval()
+            global_discriminator.eval()
+            local_discriminator.eval()
             with torch.no_grad():
                 (
                     valid_loss,
@@ -242,7 +220,7 @@ def main(opt):
                 score_descent += 1
 
             # log
-            lr = optimizer.param_groups[0]["lr"]
+            lr = optimizer_model.param_groups[0]["lr"]
             valid_log = f'\nValidation at {iteration}/{opt.total_iter}:\n'
             valid_log += f'Train_loss: {loss_avg.val():0.4f}, Valid_loss: {valid_loss:0.4f}, '
             valid_log += f'Current_lr: {lr:0.5f}, '
@@ -262,10 +240,6 @@ def main(opt):
             main_log += f'Stop training at iteration: {iteration}!\n'
             print(f'Stop training at iteration: {iteration}!\n')
             break
-
-        if opt.decay_flag and iteration > (opt.total_iter // 2):
-            d_image_opt.param_groups[0]['lr'] -= (opt.lr / (opt.total_iter // 2))
-            d_inst_opt.param_groups[0]['lr'] -= (opt.lr / (opt.total_iter // 2))
 
         """ source domain """
         try:
@@ -338,24 +312,33 @@ def main(opt):
 
         # add domain loss
         loss = src_cls_loss.mean() + omega * (d_img_loss.mean() + d_inst_loss.mean())
+
+        model.zero_grad(set_to_none=True)
+        global_discriminator.zero_grad(set_to_none=True)
+        local_discriminator.zero_grad(set_to_none=True)
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(), opt.grad_clip
+        )   # gradient clipping with 5 (Default)
+        torch.nn.utils.clip_grad_norm_(
+            global_discriminator.parameters(), opt.grad_clip
+        )   # gradient clipping with 5 (Default)
+        torch.nn.utils.clip_grad_norm_(
+            local_discriminator.parameters(), opt.grad_clip
+        )   # gradient clipping with 5 (Default)
+
+        optimizer_model.step()
+        optimizer_global.step()
+        optimizer_local.step()
+
         loss_avg.add(loss)
         cls_loss_avg.add(src_cls_loss)
         sim_loss_avg.add(d_img_loss + d_inst_loss)
-
-        # set gradient to zero...
-        model.zero_grad(set_to_none=True)
-        # Domain classifiers
-        global_discriminator.zero_grad(set_to_none=True)
-        local_discriminator.zero_grad(set_to_none=True)
         
-        # backward
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)  # gradient clipping with 5 (Default)
-        # frcnn optimizer update
-        optimizer.step()
-        # domain optimizer update
-        d_inst_opt.step()
-        d_image_opt.step()
+        scheduler_model.step()
+        scheduler_global.step()
+        scheduler_local.step()
 
 
 if __name__ == '__main__':
@@ -434,30 +417,12 @@ if __name__ == '__main__':
         "--hidden_size", type=int, default=256, help="the size of the LSTM hidden state"
     )
     """ Optimizer """
-    # # Optimization options
-    parser.add_argument('--adam', action='store_true',
-                        help='Whether to use adam (default is Adadelta)')
-    parser.add_argument('--optimizer', type=str, default='adadelta',
-                        help='optimizer type: adam , Radam, Adadelta')
-    parser.add_argument('--lr', type=float, default=0.1,
-                        help='learning rate, default=0.1 for adam')
-    parser.add_argument('--decay_flag', action='store_true', help='for learning rate decay')
-    parser.add_argument('--beta1', type=float, default=0.9, help='beta1 for adam. default=0.9')
-    parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for adam. default=0.9')
-    # parser.add_argument('--weight_decay', type=float, default=0.9, help='weight_decay for adam. default=0.9')
-    parser.add_argument('--schedule', type=int, nargs='+', default=[150, 225],
-                        help='Decrease learning rate at these epochs.')
-    parser.add_argument('--pc', type=float, default=0.0,
-                        help='confidence threshold,, 0,0.1,0.2,0.4,0.8.')
-    parser.add_argument('--gamma', type=float, default=0.1,
-                        help='LR is multiplied by gamma on schedule.')
-    parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                        help='momentum')
-    parser.add_argument('--weight_decay', '--wd', default=1e-4, type=float,
-                        metavar='W', help='weight decay (default: 1e-4)')
-    parser.add_argument('--rho', type=float, default=0.95,
-                        help='decay rate rho for Adadelta. default=0.95')
-    parser.add_argument('--eps', type=float, default=1e-8, help='eps for Adadelta. default=1e-8')
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=0.001,
+        help="learning rate, 0.001 for Adam",
+    )
     """ Experiment """
     parser.add_argument('--manual_seed', type=int, default=111, help='for random seed setting')
     """ Adaptation """
