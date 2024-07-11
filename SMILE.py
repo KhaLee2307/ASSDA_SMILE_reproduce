@@ -209,6 +209,11 @@ def main(opt):
             cls_loss_avg.reset()
             em_loss_avg.reset()
 
+        if iteration == opt.total_iter:
+            log += f'Stop training at iteration: {iteration}!\n'
+            print(f'Stop training at iteration: {iteration}!\n')
+            break
+
         """ source domain """
         try:
             images_source_tensor, labels_source = next(source_loader_iter)

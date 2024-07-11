@@ -257,6 +257,11 @@ def main(opt):
             loss_avg.reset()
             cls_loss_avg.reset()
             sim_loss_avg.reset()
+        
+        if iteration == opt.total_iter:
+            log += f'Stop training at iteration: {iteration}!\n'
+            print(f'Stop training at iteration: {iteration}!\n')
+            break
 
         if opt.decay_flag and iteration > (opt.total_iter // 2):
             d_image_opt.param_groups[0]['lr'] -= (opt.lr / (opt.total_iter // 2))
