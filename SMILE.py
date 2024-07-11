@@ -210,7 +210,7 @@ def main(opt):
             em_loss_avg.reset()
 
         if iteration == opt.total_iter:
-            log += f'Stop training at iteration: {iteration}!\n'
+            main_log += f'Stop training at iteration: {iteration}!\n'
             print(f'Stop training at iteration: {iteration}!\n')
             break
 
