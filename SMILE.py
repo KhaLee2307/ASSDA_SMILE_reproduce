@@ -196,7 +196,7 @@ def main(opt):
             lr = optimizer.param_groups[0]["lr"]
             valid_log = f'\nValidation at {iteration}/{opt.total_iter}:\n'
             valid_log += f'Train_loss: {loss_avg.val():0.4f}, Valid_loss: {valid_loss:0.4f}, '
-            valid_log += f'Current_lr: {lr:0.f}, '
+            valid_log += f'Current_lr: {lr:0.5f}, '
             valid_log += f'Current_score: {current_score:0.2f}, Best_score: {best_score:0.2f}, '
             valid_log += f'Score_descent: {score_descent}\n'
             print(valid_log)
@@ -208,10 +208,6 @@ def main(opt):
             loss_avg.reset()
             cls_loss_avg.reset()
             em_loss_avg.reset()
-
-        if opt.decay_flag and iteration > (opt.total_iter // 2):
-            d_image_opt.param_groups[0]['lr'] -= (opt.lr / (opt.total_iter // 2))
-            d_inst_opt.param_groups[0]['lr'] -= (opt.lr / (opt.total_iter // 2))
 
         """ source domain """
         try:
@@ -267,9 +263,11 @@ def main(opt):
 
                 choosed_ent, _ = tar_ent_pool.topk(k, largest=False)
                 choosed_ent_pool = torch.cat((choosed_ent_pool, choosed_ent), 0)
+
+            loss = src_cls_loss.mean() + choosed_ent_pool.mean() * tar_lambda
+        else:
+            loss = src_cls_loss.mean() + tar_em_loss.mean() * tar_lambda
         
-        # add loss
-        loss = src_cls_loss.mean() + tar_em_loss.mean() * tar_lambda
         loss_avg.add(loss)
         cls_loss_avg.add(src_cls_loss)
         em_loss_avg.add(tar_em_loss)

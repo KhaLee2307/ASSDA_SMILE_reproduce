@@ -245,7 +245,7 @@ def main(opt):
             lr = optimizer.param_groups[0]["lr"]
             valid_log = f'\nValidation at {iteration}/{opt.total_iter}:\n'
             valid_log += f'Train_loss: {loss_avg.val():0.4f}, Valid_loss: {valid_loss:0.4f}, '
-            valid_log += f'Current_lr: {lr:0.7f}, '
+            valid_log += f'Current_lr: {lr:0.5f}, '
             valid_log += f'Current_score: {current_score:0.2f}, Best_score: {best_score:0.2f}, '
             valid_log += f'Score_descent: {score_descent}\n'
             print(valid_log)
