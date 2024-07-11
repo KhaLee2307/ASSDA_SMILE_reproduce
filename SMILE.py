@@ -6,14 +6,11 @@ from tqdm import tqdm
 import numpy as np
 
 import torch
-import torch.optim as optim
 import torch.backends.cudnn as cudnn
 from torch.utils.data import Subset
 
 from source.dataset import hierarchical_dataset, get_dataloader
 from source.model import Model
-
-from modules.radam import AdamW, RAdam
 
 from utils.converter import AttnLabelConverter, CTCLabelConverter
 from utils.averager import Averager
@@ -21,28 +18,6 @@ from utils.averager import Averager
 from test import validation
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def setup_optimizer(opt, filtered_parameters):
-    # setup optimizer
-    if opt.optimizer.lower() == 'sgd':
-        optimizer = optim.SGD(filtered_parameters, lr=opt.lr, momentum=opt.momentum,
-                                weight_decay=opt.weight_decay)
-
-    elif opt.optimizer.lower() == 'adam':
-        optimizer = AdamW(filtered_parameters, lr=opt.lr, betas=(opt.beta1, opt.beta2),
-                                weight_decay=opt.weight_decay)
-
-    elif opt.optimizer.lower() == 'radam':
-        optimizer = RAdam(filtered_parameters, lr=opt.lr,
-                                betas=(opt.beta1, opt.beta2),
-                                weight_decay=opt.weight_decay)
-
-    else:
-        optimizer = optim.Adadelta(filtered_parameters, lr=0.1 * opt.lr, rho=opt.rho,
-                                            eps=opt.eps)
-
-    return optimizer
 
 
 def get_batch_entropy_loss(p_softmax):
@@ -113,7 +88,6 @@ def main(opt):
     else:
         # ignore [PAD] token
         criterion = torch.nn.CrossEntropyLoss(ignore_index=converter.dict["[PAD]"]).to(device)
-    D_criterion = torch.nn.BCEWithLogitsLoss().to(device)
 
     # filter that only require gradient descent
     filtered_parameters = []
@@ -139,8 +113,18 @@ def main(opt):
     main_log += opt_log
 
     # set up optimizer
-    optimizer  = setup_optimizer(opt, filtered_parameters)
+    optimizer = torch.optim.AdamW(filtered_parameters, lr=opt.lr, weight_decay = 0.01)
 
+    # set up scheduler
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer,
+                max_lr=opt.lr,
+                cycle_momentum=False,
+                div_factor=20,
+                final_div_factor=1000,
+                total_steps=opt.total_iter,
+            )
+    
     print("Start Adapting...\n")
     main_log += "Start Adapting...\n"
 
@@ -154,7 +138,6 @@ def main(opt):
     loss_avg = Averager()
 
     # training loop
-    start_iter = 0
     best_score = float('-inf')
     score_descent = 0
 
@@ -164,11 +147,11 @@ def main(opt):
     tar_lambda = opt.tar_lambda
 
     for iteration in tqdm(
-            range(start_iter, opt.total_iter + 1),
-            total=opt.total_iter,
-            position=0,
-            leave=True,
-        ):
+        range(0, opt.total_iter + 1),
+        total=opt.total_iter,
+        position=0,
+        leave=True,
+    ):
         if (iteration % opt.val_interval == 0 or iteration == opt.total_iter):
             # valiation part
             model.eval()
@@ -362,28 +345,12 @@ if __name__ == '__main__':
         "--hidden_size", type=int, default=256, help="the size of the LSTM hidden state"
     )
     """ Optimizer """
-    # # Optimization options
-    parser.add_argument('--adam', action='store_true',
-                        help='Whether to use adam (default is Adadelta)')
-    parser.add_argument('--optimizer', type=str, default='adadelta',
-                        help='optimizer type: adam , Radam, Adadelta')
-    parser.add_argument('--lr', type=float, default=0.1,
-                        help='learning rate, default=0.1 for adam')
-    parser.add_argument('--decay_flag', action='store_true', help='for learning rate decay')
-    parser.add_argument('--beta1', type=float, default=0.9, help='beta1 for adam. default=0.9')
-    parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for adam. default=0.9')
-    # parser.add_argument('--weight_decay', type=float, default=0.9, help='weight_decay for adam. default=0.9')
-    parser.add_argument('--schedule', type=int, nargs='+', default=[150, 225],
-                        help='Decrease learning rate at these epochs.')
-    parser.add_argument('--pc', type=float, default=0.0,
-                        help='confidence threshold,, 0,0.1,0.2,0.4,0.8.')
-    parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                        help='momentum')
-    parser.add_argument('--weight_decay', '--wd', default=1e-4, type=float,
-                        metavar='W', help='weight decay (default: 1e-4)')
-    parser.add_argument('--rho', type=float, default=0.95,
-                        help='decay rate rho for Adadelta. default=0.95')
-    parser.add_argument('--eps', type=float, default=1e-8, help='eps for Adadelta. default=1e-8')
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=0.001,
+        help="learning rate, 0.001 for Adam",
+    )
     """ Experiment """
     parser.add_argument('--manual_seed', type=int, default=111, help='for random seed setting')
     """ Adaptation """
