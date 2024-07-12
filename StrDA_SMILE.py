@@ -299,8 +299,8 @@ def main(opt):
 
         # select sub-target domain
         target_data_list = list(np.load(f'indexing/{opt.approach}/intermediate_{round + 1}.npy'))
-        target_data = Subset(target_data, target_data_list)
-        target_loader = get_dataloader(opt, target_data, opt.batch_size, shuffle = True, mode = "raw", aug = opt.aug)
+        target_data_adapting = Subset(target_data, target_data_list)
+        target_loader = get_dataloader(opt, target_data_adapting, opt.batch_size, shuffle = True, mode = "raw", aug = opt.aug)
 
         data_log = ""
         data_log += f"-- Number of apating data: {len(target_data_list)} \n"
@@ -308,7 +308,7 @@ def main(opt):
         print(data_log)
         adapt_log += data_log
 
-        del target_data_list, target_data
+        del target_data_list, target_data_adapting
 
         # UDA
         print(dashed_line)
