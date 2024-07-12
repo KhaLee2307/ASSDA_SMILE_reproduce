@@ -433,7 +433,9 @@ if __name__ == '__main__':
     )
     parser.add_argument("--approach", required = True, help="select indexing approach")
     parser.add_argument("--aug", action='store_true', default=False, help='augmentation or not')
-
+    parser.add_argument('--pc', type=float, default=0.1,
+                        help='confidence threshold,, 0,0.1,0.2,0.4,0.8.')
+    
     opt = parser.parse_args()
 
     opt.use_IMAGENET_norm = False  # for CRNN and TRBA
