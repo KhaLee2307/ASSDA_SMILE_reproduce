@@ -13,6 +13,8 @@ from torch.utils.data import Subset
 from source.dataset import hierarchical_dataset, get_dataloader
 from source.model import Model
 
+from modules.domain_adapt import d_cls_inst
+
 from utils.converter import AttnLabelConverter, CTCLabelConverter
 from utils.averager import Averager
 
@@ -21,30 +23,61 @@ from test import validation
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def get_batch_entropy_loss(p_softmax):
-    entropy = - torch.mul(p_softmax, torch.log(p_softmax))
-    entropy =  torch.sum(entropy, dim=1)
-    return entropy
+def filter_local_features(opt,
+                          source_context_history, source_prediction,
+                          target_context_history, target_prediction):
+    feature_dim = source_context_history.size()[-1]
+
+    source_feature = source_context_history.reshape(-1, feature_dim)
+    target_feature = target_context_history.reshape(-1, feature_dim)
+
+    # print(type(pred_class),pred_class)
+    source_pred_score, source_pred_class = source_prediction.max(-1)
+    target_pred_score, target_pred_class = target_prediction.max(-1)
+    source_valid_char_index = (source_pred_score.reshape(-1, ) > opt.pc).nonzero().reshape(-1, )
+    source_valid_char_feature = source_feature.reshape(-1, feature_dim).index_select(0, source_valid_char_index)
+    target_valid_char_index = (target_pred_score.reshape(-1, ) > opt.pc).nonzero().reshape(-1, )
+    target_valid_char_feature = target_feature.reshape(-1, feature_dim).index_select(0, target_valid_char_index)
+
+    return source_valid_char_feature, target_valid_char_feature
 
 
-def SMILE(opt, filtered_parameters, model, criterion, converter, \
-            source_loader, valid_loader, target_loader, round = 0):
+def ASSDA(opt, filtered_parameters, model, global_discriminator, local_discriminator, criterion, D_criterion, \
+            converter, source_loader, valid_loader, target_loader, round = 0):
     
     num_iter = (opt.total_iter // opt.val_interval) // opt.num_groups * opt.val_interval
 
     if round == 1:
         num_iter += (opt.total_iter // opt.val_interval) % opt.num_groups * opt.val_interval
-    
+
     # set up iter dataloader
     source_loader_iter = iter(source_loader)
     target_loader_iter = iter(target_loader)
 
     # set up optimizer
-    optimizer = torch.optim.AdamW(filtered_parameters, lr=opt.lr, weight_decay = 0.01)
+    optimizer_model = torch.optim.AdamW(filtered_parameters, lr=opt.lr, weight_decay = 0.01)
+    optimizer_global = torch.optim.AdamW(global_discriminator.parameters(), lr=opt.lr, weight_decay = 0.01)
+    optimizer_local = torch.optim.AdamW(local_discriminator.parameters(), lr=opt.lr, weight_decay = 0.01)
 
     # set up scheduler
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                optimizer,
+    scheduler_model = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer_model,
+                max_lr=opt.lr,
+                cycle_momentum=False,
+                div_factor=20,
+                final_div_factor=1000,
+                total_steps=num_iter,
+            )
+    scheduler_global = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer_global,
+                max_lr=opt.lr,
+                cycle_momentum=False,
+                div_factor=20,
+                final_div_factor=1000,
+                total_steps=num_iter,
+            )
+    scheduler_local = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer_local,
                 max_lr=opt.lr,
                 cycle_momentum=False,
                 div_factor=20,
@@ -54,17 +87,17 @@ def SMILE(opt, filtered_parameters, model, criterion, converter, \
 
     # loss averager
     cls_loss_avg = Averager()
-    em_loss_avg = Averager()
+    sim_loss_avg = Averager()
     loss_avg = Averager()
     best_score = float('-inf')
     score_descent = 0
 
-    log = ""    
+    log = "" 
 
-    # pace parameter
-    tar_portion = opt.init_portion
-    add_portion = opt.add_portion
-    tar_lambda = opt.tar_lambda
+    # training loop
+    gamma = 0
+    omega = 1
+    start_iter = 0
 
     for iteration in tqdm(
         range(0, num_iter + 1),
@@ -75,6 +108,8 @@ def SMILE(opt, filtered_parameters, model, criterion, converter, \
         if (iteration % opt.val_interval == 0 or iteration == num_iter):
             # valiation part
             model.eval()
+            global_discriminator.eval()
+            local_discriminator.eval()
             with torch.no_grad():
                 (
                     valid_loss,
@@ -86,18 +121,20 @@ def SMILE(opt, filtered_parameters, model, criterion, converter, \
                     length_of_data,
                 ) = validation(model, criterion, valid_loader, converter, opt)
             model.train()
+            global_discriminator.train()
+            local_discriminator.train()
 
             if (current_score >= best_score):
                 score_descent = 0
 
                 best_score = current_score
-                torch.save(model.state_dict(), f"./trained_model/{opt.approach}/StrDA_SMILE_round{round}.pth")
+                torch.save(model.state_dict(), f"./trained_model/{opt.approach}/StrDA_ASSDA_round{round}.pth")
             else:
                 score_descent += 1
 
             # log
-            lr = optimizer.param_groups[0]["lr"]
-            valid_log = f'\nValidation at {iteration}/{num_iter}:\n'
+            lr = optimizer_model.param_groups[0]["lr"]
+            valid_log = f'\nValidation at {iteration}/{opt.total_iter}:\n'
             valid_log += f'Train_loss: {loss_avg.val():0.4f}, Valid_loss: {valid_loss:0.4f}, '
             valid_log += f'Current_lr: {lr:0.5f}, '
             valid_log += f'Current_score: {current_score:0.2f}, Best_score: {best_score:0.2f}, '
@@ -110,8 +147,8 @@ def SMILE(opt, filtered_parameters, model, criterion, converter, \
 
             loss_avg.reset()
             cls_loss_avg.reset()
-            em_loss_avg.reset()
-
+            sim_loss_avg.reset()
+        
         if iteration == num_iter:
             log += f'Stop training at iteration: {iteration}!\n'
             print(f'Stop training at iteration: {iteration}!\n')
@@ -143,8 +180,12 @@ def SMILE(opt, filtered_parameters, model, criterion, converter, \
         # Attention # align with Attention.forward
         src_preds, src_global_feature, src_local_feature = model(images_source_tensor, labels_source_index[:, :-1]) # align with Attention.forward
 
+        # src_global_feature = model.visual_feature
+        # src_local_feature = model.Prediction.context_history
         target = labels_source_index[:, 1:]  # without [SOS] Symbol
         src_cls_loss = criterion(src_preds.view(-1, src_preds.shape[-1]), target.contiguous().view(-1))
+        src_global_feature = src_global_feature.reshape(src_global_feature.shape[0], -1)
+        src_local_feature = src_local_feature.view(-1, src_local_feature.shape[-1])
 
         text_for_pred = (
                     torch.LongTensor(len(images_target_tensor))
@@ -153,46 +194,70 @@ def SMILE(opt, filtered_parameters, model, criterion, converter, \
                 )
         tar_preds, tar_global_feature, tar_local_feature = model(images_target_tensor, text_for_pred, is_train=False)
 
-        # target entropy minimization
-        tar_preds = torch.nn.functional.softmax(tar_preds.view(-1, tar_preds.shape[-1]), dim=-1)
+        # tar_global_feature = model.visual_feature
+        # tar_local_feature = model.Prediction.context_history
+        tar_global_feature = tar_global_feature.reshape(tar_global_feature.shape[0], -1)
+        tar_local_feature = tar_local_feature.view(-1, tar_local_feature.shape[-1])
 
-        # self-paced procedure
-        tar_em_loss = get_batch_entropy_loss(tar_preds)
-        if tar_portion < 1.0 :
-            tar_portion = min(tar_portion + add_portion, 1)
-            tar_preds_max_prob, tar_preds_class = tar_preds.max(dim=1)
+        src_local_feature, tar_local_feature = filter_local_features(opt, src_local_feature, src_preds, 
+                                                                        tar_local_feature, tar_preds)
 
-            class_set = torch.unique(tar_preds_class)[1:] # without [SOS] Symbol
-            choosed_ent_pool = torch.tensor([], device=device)
-            for c in class_set: 
-                mask = tar_preds_class == c
-                tar_ent_pool = tar_em_loss[mask]
-                k = max(int(len(tar_ent_pool) * tar_portion), 1)
+        # add domain adaption elements
+        # setup hyperparameter
+        if iteration % 2000 == 0:
+            p = float(iteration + start_iter) / opt.total_iter
+            gamma = 2. / (1. + np.exp(-10 * p)) - 1
+            omega = 1 - 1. / (1. + np.exp(-10 * p))
+        global_discriminator.module.set_beta(gamma)
+        local_discriminator.module.set_beta(gamma)
 
-                choosed_ent, _ = tar_ent_pool.topk(k, largest=False)
-                choosed_ent_pool = torch.cat((choosed_ent_pool, choosed_ent), 0)
+        src_d_img_score = global_discriminator(src_global_feature)
+        src_d_inst_score = local_discriminator(src_local_feature)
+        tar_d_img_score = global_discriminator(tar_global_feature)
+        tar_d_inst_score = local_discriminator(tar_local_feature)
 
-            loss = src_cls_loss.mean() + choosed_ent_pool.mean() * tar_lambda
-        else:
-            loss = src_cls_loss.mean() + tar_em_loss.mean() * tar_lambda
+        src_d_img_loss = D_criterion(src_d_img_score, torch.zeros_like(src_d_img_score).to(device))
+        src_d_inst_loss = D_criterion(src_d_inst_score, torch.zeros_like(src_d_inst_score).to(device))
+        tar_d_img_loss = D_criterion(tar_d_img_score, torch.ones_like(tar_d_img_score).to(device))
+        tar_d_inst_loss = D_criterion(tar_d_inst_score, torch.ones_like(tar_d_inst_score).to(device))
+        d_img_loss = src_d_img_loss + tar_d_img_loss
+        d_inst_loss = src_d_inst_loss + tar_d_inst_loss
 
-        model.zero_grad(set_to_none=True)        
+        # add domain loss
+        loss = src_cls_loss.mean() + omega * (d_img_loss.mean() + d_inst_loss.mean())
+
+        model.zero_grad(set_to_none=True)
+        global_discriminator.zero_grad(set_to_none=True)
+        local_discriminator.zero_grad(set_to_none=True)
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             model.parameters(), opt.grad_clip
         )   # gradient clipping with 5 (Default)
-        optimizer.step()
+        torch.nn.utils.clip_grad_norm_(
+            global_discriminator.parameters(), opt.grad_clip
+        )   # gradient clipping with 5 (Default)
+        torch.nn.utils.clip_grad_norm_(
+            local_discriminator.parameters(), opt.grad_clip
+        )   # gradient clipping with 5 (Default)
+
+        optimizer_model.step()
+        optimizer_global.step()
+        optimizer_local.step()
 
         loss_avg.add(loss)
         cls_loss_avg.add(src_cls_loss)
-        em_loss_avg.add(tar_em_loss)
-
-        scheduler.step()
+        sim_loss_avg.add(d_img_loss + d_inst_loss)
+        
+        scheduler_model.step()
+        scheduler_global.step()
+        scheduler_local.step()
 
     # save log
     print(log, file= open(f'log/{opt.approach}/log_domain_adaptation_round{round}.txt', 'w'))
 
-    del optimizer, scheduler, source_loader_iter, target_loader_iter, loss_avg, cls_loss_avg, em_loss_avg
+    del optimizer_model, optimizer_global, optimizer_local, scheduler_model, scheduler_global, scheduler_local
+    del source_loader_iter, target_loader_iter, loss_avg, cls_loss_avg, sim_loss_avg
 
     # free cache
     torch.cuda.empty_cache()
@@ -238,16 +303,24 @@ def main(opt):
     model = Model(opt)
     opt_log += "Init model\n"
 
+    # initialize domain classifiers here.
+    global_discriminator = d_cls_inst(fc_size=13312)
+    local_discriminator = d_cls_inst(fc_size=256)
+
     # data parallel for multi-GPU
     model = torch.nn.DataParallel(model).to(device)
+    global_discriminator = torch.nn.DataParallel(global_discriminator).to(device)
+    local_discriminator = torch.nn.DataParallel(local_discriminator).to(device)
     model.train()
+    global_discriminator.train()
+    local_discriminator.train()
 
     # load pretrained model
     pretrained = torch.load(opt.saved_model)
     model.load_state_dict(pretrained)
     torch.save(
             pretrained,
-            f"./trained_model/{opt.approach}/StrDA_SMILE_round0.pth"
+            f"./trained_model/{opt.approach}/StrDA_ASSDA_round0.pth"
         )
     opt_log += "Load pretrained model\n"
 
@@ -259,6 +332,7 @@ def main(opt):
     else:
         # ignore [PAD] token
         criterion = torch.nn.CrossEntropyLoss(ignore_index=converter.dict["[PAD]"]).to(device)
+    D_criterion = torch.nn.BCEWithLogitsLoss().to(device)
 
     # filter that only require gradient descent
     filtered_parameters = []
@@ -293,7 +367,7 @@ def main(opt):
 
         # load best model of previous round
         adapt_log +=  f"- Load best model of previous round ({round}). \n"
-        pretrained = torch.load(f"./trained_model/{opt.approach}/StrDA_SMILE_round{round}.pth")
+        pretrained = torch.load(f"./trained_model/{opt.approach}/StrDA_ASSDA_round{round}.pth")
         model.load_state_dict(pretrained)
         del pretrained
 
@@ -316,8 +390,8 @@ def main(opt):
         adapt_log += "\n- Seft-training"
 
         domain_adaptation_start = time.time()
-        SMILE(opt, filtered_parameters, model, criterion, converter, \
-                    source_loader, valid_loader, target_loader, round + 1)
+        ASSDA(opt, filtered_parameters, model, global_discriminator, local_discriminator, criterion, D_criterion, \
+              converter, source_loader, valid_loader, target_loader, round + 1)
         domain_adaptationg_end = time.time()
 
         print(f"Processing time: {domain_adaptationg_end - domain_adaptation_start}s")
@@ -331,7 +405,7 @@ def main(opt):
         print(dashed_line)
         print(dashed_line)
         print(dashed_line)
-        
+
     # save log
     print(main_log, file = open(f'log/{opt.approach}/log_domain_adaptation.txt', 'w'))
 
@@ -424,13 +498,9 @@ if __name__ == '__main__':
     parser.add_argument("--approach", required = True, help="select indexing approach")
     parser.add_argument("--num_groups", type=int, required = True, help="number of intermediate data group")
     parser.add_argument("--aug", action='store_true', default=False, help='augmentation or not')
-    parser.add_argument('--init_portion', type=float, default=0.5,
-                        help='the size of initial target portion')
-    parser.add_argument('--add_portion', type=float, default=0.0001,
-                        help='the adding portion of self-paced learning')
-    parser.add_argument('--tar_lambda', type=float, default=1.0,
-                        help='the weight of the target domain loss')
-
+    parser.add_argument('--pc', type=float, default=0.1,
+                        help='confidence threshold,, 0,0.1,0.2,0.4,0.8.')
+    
     opt = parser.parse_args()
 
     opt.use_IMAGENET_norm = False  # for CRNN and TRBA
