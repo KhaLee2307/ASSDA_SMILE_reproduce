@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import random
 import argparse
 from tqdm import tqdm
@@ -26,91 +27,17 @@ def get_batch_entropy_loss(p_softmax):
     return entropy
 
 
-def main(opt):
-    dashed_line = "-" * 80
-    main_log = ""
-    opt_log = dashed_line + "\n"
+def domain_adaptation(opt, filtered_parameters, model, criterion, converter, \
+                  source_loader, valid_loader, target_loader, round = 0):
+    
+    num_iter = (opt.total_iter // opt.val_interval) // opt.num_groups * opt.val_interval
 
-    """ create folder for log and trained model """
-    if (not os.path.exists(f'log/{opt.approach}/')):
-        os.makedirs(f'log/{opt.approach}/')
-    if (not os.path.exists(f'trained_model/{opt.approach}/')):
-        os.makedirs(f'trained_model/{opt.approach}/')
-
-    # source data
-    source_data, source_data_log = hierarchical_dataset(opt.source_data, opt)
-    opt_log += source_data_log
-
-    # target data
-    target_data_list = list(np.load(opt.select_data))
-    target_data, target_data_log = hierarchical_dataset(opt.target_data, opt, mode = "raw")
-    target_data = Subset(target_data, target_data_list)
-    opt_log += target_data_log
-
-    # valid data
-    valid_data, valid_data_log = hierarchical_dataset(opt.valid_data, opt)
-    opt_log += valid_data_log
-
-    source_loader = get_dataloader(opt, source_data, opt.batch_size, shuffle = True, mode = "label", aug = True)
-    target_loader = get_dataloader(opt, target_data, opt.batch_size, shuffle = True, mode = "raw", aug = opt.aug)
-    valid_loader = get_dataloader(opt, valid_data, opt.batch_size_val, shuffle = False)
-
-    del source_data, source_data_log, target_data, target_data_log, valid_data, valid_data_log
-    del target_data_list
-
-    """ model configuration """
-    if opt.Prediction == "CTC":
-        converter = CTCLabelConverter(opt.character)
-    else:
-        converter = AttnLabelConverter(opt.character)
-        opt.sos_token_index = converter.dict["[SOS]"]
-        opt.eos_token_index = converter.dict["[EOS]"]
-    opt.num_class = len(converter.character)
-
-    # setup model
-    model = Model(opt)
-    opt_log += "Init model\n"
-
-    # data parallel for multi-GPU
-    model = torch.nn.DataParallel(model).to(device)
-    model.train()
-
-    # load pretrained model
-    pretrained = torch.load(opt.saved_model)
-    model.load_state_dict(pretrained)
-    opt_log += "Load pretrained model\n"
-
-    del pretrained
-
-    """ setup loss """
-    if opt.Prediction == "CTC":
-        criterion = torch.nn.CTCLoss(zero_infinity=True).to(device)
-    else:
-        # ignore [PAD] token
-        criterion = torch.nn.CrossEntropyLoss(ignore_index=converter.dict["[PAD]"]).to(device)
-
-    # filter that only require gradient descent
-    filtered_parameters = []
-    params_num = []
-    for p in filter(lambda p: p.requires_grad, model.parameters()):
-        filtered_parameters.append(p)
-        params_num.append(np.prod(p.size()))
-    print(f"Trainable params num: {sum(params_num)}")
-    opt_log += f"Trainable params num: {sum(params_num)}"
-
-    del params_num
-
-    """ final options """
-    opt_log += "------------ Options -------------\n"
-    args = vars(opt)
-    for k, v in args.items():
-        if str(k) == "character" and len(str(v)) > 500:
-            opt_log += f"{str(k)}: So many characters to show all: number of characters: {len(str(v))}\n"
-        else:
-            opt_log += f"{str(k)}: {str(v)}\n"
-    opt_log += "---------------------------------------\n"
-    print(opt_log)
-    main_log += opt_log
+    if round == 1:
+        num_iter += (opt.total_iter // opt.val_interval) % opt.num_groups * opt.val_interval
+    
+    # set up iter dataloader
+    source_loader_iter = iter(source_loader)
+    target_loader_iter = iter(target_loader)
 
     # set up optimizer
     optimizer = torch.optim.AdamW(filtered_parameters, lr=opt.lr, weight_decay = 0.01)
@@ -122,24 +49,17 @@ def main(opt):
                 cycle_momentum=False,
                 div_factor=20,
                 final_div_factor=1000,
-                total_steps=opt.total_iter,
+                total_steps=num_iter,
             )
-    
-    print("Start Adapting...\n")
-    main_log += "Start Adapting...\n"
-
-    # set up iter dataloader
-    source_loader_iter = iter(source_loader)
-    target_loader_iter = iter(target_loader)
 
     # loss averager
     cls_loss_avg = Averager()
     em_loss_avg = Averager()
     loss_avg = Averager()
-
-    # training loop
     best_score = float('-inf')
     score_descent = 0
+
+    log = ""    
 
     # pace parameter
     tar_portion = opt.init_portion
@@ -147,12 +67,12 @@ def main(opt):
     tar_lambda = opt.tar_lambda
 
     for iteration in tqdm(
-        range(0, opt.total_iter + 1),
-        total=opt.total_iter,
+        range(0, num_iter + 1),
+        total=num_iter,
         position=0,
         leave=True,
     ):
-        if (iteration % opt.val_interval == 0 or iteration == opt.total_iter):
+        if (iteration % opt.val_interval == 0 or iteration == num_iter):
             # valiation part
             model.eval()
             with torch.no_grad():
@@ -171,29 +91,29 @@ def main(opt):
                 score_descent = 0
 
                 best_score = current_score
-                torch.save(model.state_dict(), f"./trained_model/{opt.approach}/{opt.model}_best_SMILE.pth")
+                torch.save(model.state_dict(), f"./trained_model/{opt.approach}/StrDA_SMILE_round{round}.pth")
             else:
                 score_descent += 1
 
             # log
             lr = optimizer.param_groups[0]["lr"]
-            valid_log = f'\nValidation at {iteration}/{opt.total_iter}:\n'
+            valid_log = f'\nValidation at {iteration}/{num_iter}:\n'
             valid_log += f'Train_loss: {loss_avg.val():0.4f}, Valid_loss: {valid_loss:0.4f}, '
             valid_log += f'Current_lr: {lr:0.5f}, '
             valid_log += f'Current_score: {current_score:0.2f}, Best_score: {best_score:0.2f}, '
             valid_log += f'Score_descent: {score_descent}\n'
             print(valid_log)
 
-            main_log += valid_log
+            log += valid_log
 
-            main_log += dashed_line
+            log += "-" * 80 +"\n"
 
             loss_avg.reset()
             cls_loss_avg.reset()
             em_loss_avg.reset()
 
-        if iteration == opt.total_iter:
-            main_log += f'Stop training at iteration: {iteration}!\n'
+        if iteration == num_iter:
+            log += f'Stop training at iteration: {iteration}!\n'
             print(f'Stop training at iteration: {iteration}!\n')
             break
 
@@ -269,6 +189,149 @@ def main(opt):
 
         scheduler.step()
 
+    # save log
+    print(log, file= open(f'log/{opt.approach}/log_domain_adaptation_round{round}.txt', 'w'))
+
+    del optimizer, scheduler, source_loader_iter, target_loader_iter, loss_avg, cls_loss_avg, em_loss_avg
+
+    # free cache
+    torch.cuda.empty_cache()
+
+def main(opt):
+    dashed_line = "-" * 80
+    main_log = ""
+    opt_log = dashed_line + "\n"
+
+    """ create folder for log and trained model """
+    if (not os.path.exists(f'log/{opt.approach}/')):
+        os.makedirs(f'log/{opt.approach}/')
+    if (not os.path.exists(f'trained_model/{opt.approach}/')):
+        os.makedirs(f'trained_model/{opt.approach}/')
+
+    # source data
+    source_data, source_data_log = hierarchical_dataset(opt.source_data, opt)
+    opt_log += source_data_log
+
+    # target data
+    target_data, target_data_log = hierarchical_dataset(opt.target_data, opt, mode = "raw")
+    opt_log += target_data_log
+
+    # valid data
+    valid_data, valid_data_log = hierarchical_dataset(opt.valid_data, opt)
+    opt_log += valid_data_log
+
+    source_loader = get_dataloader(opt, source_data, opt.batch_size, shuffle = True, mode = "label", aug = True)
+    valid_loader = get_dataloader(opt, valid_data, opt.batch_size_val, shuffle = False)
+
+    del source_data, source_data_log, target_data_log, valid_data, valid_data_log
+
+    """ model configuration """
+    if opt.Prediction == "CTC":
+        converter = CTCLabelConverter(opt.character)
+    else:
+        converter = AttnLabelConverter(opt.character)
+        opt.sos_token_index = converter.dict["[SOS]"]
+        opt.eos_token_index = converter.dict["[EOS]"]
+    opt.num_class = len(converter.character)
+
+    # setup model
+    model = Model(opt)
+    opt_log += "Init model\n"
+
+    # data parallel for multi-GPU
+    model = torch.nn.DataParallel(model).to(device)
+    model.train()
+
+    # load pretrained model
+    pretrained = torch.load(opt.saved_model)
+    model.load_state_dict(pretrained)
+    torch.save(
+            pretrained,
+            f"./trained_model/{opt.approach}/StrDA_SMILE_round0.pth"
+        )
+    opt_log += "Load pretrained model\n"
+
+    del pretrained
+
+    """ setup loss """
+    if opt.Prediction == "CTC":
+        criterion = torch.nn.CTCLoss(zero_infinity=True).to(device)
+    else:
+        # ignore [PAD] token
+        criterion = torch.nn.CrossEntropyLoss(ignore_index=converter.dict["[PAD]"]).to(device)
+
+    # filter that only require gradient descent
+    filtered_parameters = []
+    params_num = []
+    for p in filter(lambda p: p.requires_grad, model.parameters()):
+        filtered_parameters.append(p)
+        params_num.append(np.prod(p.size()))
+    print(f"Trainable params num: {sum(params_num)}")
+    opt_log += f"Trainable params num: {sum(params_num)}"
+
+    del params_num
+
+    """ final options """
+    opt_log += "------------ Options -------------\n"
+    args = vars(opt)
+    for k, v in args.items():
+        if str(k) == "character" and len(str(v)) > 500:
+            opt_log += f"{str(k)}: So many characters to show all: number of characters: {len(str(v))}\n"
+        else:
+            opt_log += f"{str(k)}: {str(v)}\n"
+    opt_log += "---------------------------------------\n"
+    print(opt_log)
+    main_log += opt_log
+    print("Start Adapting...\n")
+    main_log += "Start Adapting...\n"
+
+    for round in range(opt.num_groups):
+
+        adapt_log = ""
+        print(f"\nRound {round+1}/{opt.num_groups}: \n")
+        adapt_log += f"\nRound {round+1}/{opt.num_groups}: \n"
+
+        # load best model of previous round
+        adapt_log +=  f"- Load best model of previous round ({round}). \n"
+        pretrained = torch.load(f"./trained_model/{opt.approach}/_SMILE_round{round}.pth")
+        model.load_state_dict(pretrained)
+        del pretrained
+
+        # select sub-target domain
+        target_data_list = list(np.load(f'indexing/{opt.approach}/intermediate_{round + 1}.npy'))
+        target_data = Subset(target_data, target_data_list)
+        target_loader = get_dataloader(opt, target_data, opt.batch_size, shuffle = True, mode = "raw", aug = opt.aug)
+
+        data_log = ""
+        data_log += f"-- Number of apating data: {len(target_data_list)} \n"
+
+        print(data_log)
+        adapt_log += data_log
+
+        del target_data_list, target_data
+
+        # UDA
+        print(dashed_line)
+        print("- Seft-training...")
+        adapt_log += "\n- Seft-training"
+
+        domain_adaptation_start = time.time()
+        domain_adaptation(opt, filtered_parameters, model, criterion, converter, \
+                    source_loader, valid_loader, target_loader, round + 1)
+        domain_adaptationg_end = time.time()
+
+        print(f"Processing time: {domain_adaptationg_end - domain_adaptation_start}s")
+        print(f"Saved log for adapting round to: 'log/{opt.approach}/log_domain_adaptation_round{round + 1}.txt'")
+        adapt_log += f"\nProcessing time: {domain_adaptationg_end - domain_adaptation_start}s"
+        adapt_log += f"\nSaved log for adapting round to: 'log/{opt.approach}/domain_adaptation_round{round + 1}.txt'"
+
+        adapt_log += "\n" + dashed_line + "\n"
+        main_log += adapt_log
+
+        print(dashed_line)
+        print(dashed_line)
+        print(dashed_line)
+        
     # save log
     print(main_log, file = open(f'log/{opt.approach}/log_domain_adaptation.txt', 'w'))
 
@@ -358,12 +421,8 @@ if __name__ == '__main__':
     """ Experiment """
     parser.add_argument('--manual_seed', type=int, default=111, help='for random seed setting')
     """ Adaptation """
-    parser.add_argument(
-        "--select_data",
-        required=True,
-        help="path to select data",
-    )
     parser.add_argument("--approach", required = True, help="select indexing approach")
+    parser.add_argument("--num_groups", type=int, required = True, help="number of intermediate data group")
     parser.add_argument("--aug", action='store_true', default=False, help='augmentation or not')
     parser.add_argument('--init_portion', type=float, default=0.5,
                         help='the size of initial target portion')
