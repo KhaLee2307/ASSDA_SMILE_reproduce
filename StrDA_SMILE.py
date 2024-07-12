@@ -293,7 +293,7 @@ def main(opt):
 
         # load best model of previous round
         adapt_log +=  f"- Load best model of previous round ({round}). \n"
-        pretrained = torch.load(f"./trained_model/{opt.approach}/_SMILE_round{round}.pth")
+        pretrained = torch.load(f"./trained_model/{opt.approach}/StrDA_SMILE_round{round}.pth")
         model.load_state_dict(pretrained)
         del pretrained
 
